@@ -1,0 +1,55 @@
+name: Deploy Infrastructure and Apps to AWS
+
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup AWS CLI
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Generate Secrets Script
+        run: |
+          # Cria o arquivo .env dinamicamente com os segredos do GitHub Secrets
+          cat << EOF > .env
+          POSTGRES_USER=${{ secrets.POSTGRES_USER }}
+          POSTGRES_PASSWORD=${{ secrets.POSTGRES_PASSWORD }}
+          MASTER_KEY=${{ secrets.MASTER_KEY }}
+          SERVICE_API_KEY=${{ secrets.SERVICE_API_KEY }}
+          EOF
+          
+          cd scripts
+          chmod +x gerar_secret.sh
+          ./gerar_secret.sh
+
+      - name: Apply Terraform Serverless
+        run: |
+          cd terraform/serverless
+          terraform init
+          terraform apply -auto-approve
+
+      - name: Apply Terraform RDS
+        run: |
+          cd terraform/rds
+          terraform init
+          terraform apply -auto-approve
+
+      - name: Apply Terraform ElastiCache
+        run: |
+          cd terraform/elasticache
+          terraform init
+          terraform apply -auto-approve
