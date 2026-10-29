@@ -1,4 +1,4 @@
-name: Deploy Infrastructure and Apps to AWS
+name: CI/CD Pipeline - AWS & Kubernetes
 
 on:
   push:
@@ -11,7 +11,7 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Setup AWS CLI
+      - name: Setup AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -22,9 +22,11 @@ jobs:
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
 
+      - name: Setup Kubectl
+        uses: azure/setup-kubectl@v3
+
       - name: Generate Secrets Script
         run: |
-          # Cria o arquivo .env dinamicamente com os segredos do GitHub Secrets
           cat << EOF > .env
           POSTGRES_USER=${{ secrets.POSTGRES_USER }}
           POSTGRES_PASSWORD=${{ secrets.POSTGRES_PASSWORD }}
@@ -36,20 +38,57 @@ jobs:
           chmod +x gerar_secret.sh
           ./gerar_secret.sh
 
-      - name: Apply Terraform Serverless
+      # 1. Provisionamento da Camada Serverless (Repositórios ECR, SQS, DynamoDB)
+      - name: Terraform Serverless
         run: |
           cd terraform/serverless
           terraform init
           terraform apply -auto-approve
 
-      - name: Apply Terraform RDS
+      # 2. Provisionamento da Camada Relacional (RDS PostgreSQL)
+      - name: Terraform RDS
         run: |
           cd terraform/rds
           terraform init
           terraform apply -auto-approve
 
-      - name: Apply Terraform ElastiCache
+      # 3. Provisionamento da Camada de Cache (ElastiCache Redis)
+      - name: Terraform ElastiCache
         run: |
           cd terraform/elasticache
           terraform init
           terraform apply -auto-approve
+
+      # 4. Build e Push das Imagens dos Microsserviços para o ECR
+      - name: Build and Push Images to ECR
+        env:
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+        run: |
+          REGISTO="${AWS_ACCOUNT_ID}.dkr.ecr.us-east-1.amazonaws.com"
+          
+          aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin $REGISTO
+
+          SERVICOS="auth-service flag-service targeting-service evaluation-service analytics-service"
+
+          for SERVICO in $SERVICOS; do
+              echo "Construindo e enviando $SERVICO..."
+              docker build -t $SERVICO ./$SERVICO
+              docker tag $SERVICO:latest $REGISTO/$SERVICO:latest
+              docker push $REGISTO/$SERVICO:latest
+          done
+
+      # 5. Configurar kubectl para o cluster EKS do AWS Academy
+      - name: Update Kubeconfig
+        run: |
+          aws eks update-kubeconfig --region us-east-1 --name togglemaster-eks
+
+      # 6. Deploy dos Manifestos e Secrets no Kubernetes
+      - name: Deploy Kubernetes Manifests
+        env:
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+        run: |
+          # Substitui o ID da conta dinamicamente nos arquivos de deployment se necessário
+          find k8s/services/ -name "*-deployment.yaml" -exec sed -i "s|<SEU_ACCOUNT_ID>|${AWS_ACCOUNT_ID}|g" {} +
+
+          # Aplica todos os recursos da pasta de serviços (Secret gerado + Deployments)
+          kubectl apply -f k8s/services/
